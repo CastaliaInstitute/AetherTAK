@@ -32,6 +32,8 @@ entire TAK certificate workspace because it contains CA private keys.
 ## Protocol
 
 - `POST /v1/mutations` applies an idempotent domain mutation.
+- `POST /v1/published` upserts or deletes publisher-managed sensor readings and
+  read-only Al insights.
 - `GET /v1/changes?cursor=0&limit=100` returns ordered remote changes.
 - `PUT /v1/media/{mediaId}` streams a media artifact.
 - `GET /v1/media/{mediaId}` downloads an indexed media artifact.
@@ -45,6 +47,57 @@ Media uploads require `Content-Length` and `X-Aether-Sha256`. Optional
 `X-Aether-Observation-Id` and `X-Aether-Role` headers retain artifact context.
 Downloads return the stored content type and length plus `X-Aether-Sha256`;
 clients must validate all three before committing a file to offline storage.
+
+## Read-only publishers
+
+`sensor_reading` and `al_insight` records can never be submitted through the
+mobile mutation endpoint. They enter the same ordered change feed through
+`POST /v1/published`, which additionally requires the client certificate common
+name to appear in `AETHER_FIELD_PUBLISHER_CNS`. The default allowlist contains
+only the case-sensitive local AI identity `Al`; use a distinct service
+certificate before adding a ChirpStack bridge identity.
+
+An upsert body has this shape:
+
+```json
+{
+  "entityType": "sensor_reading",
+  "entityId": "reading UUID",
+  "operation": "upsert",
+  "payload": {}
+}
+```
+
+The payload must conform to the AetherTAK Field mobile schema. Replaying the
+same canonical payload is idempotent and does not advance the change cursor.
+Use `"operation": "delete"` to publish a tombstone. Publisher requests still
+require mutual TLS and are rejected with HTTP 403 for ordinary TAK users.
+
+## ChirpStack bridge
+
+The optional `chirpstack-bridge` Compose profile subscribes to ChirpStack v4
+decoded uplinks over authenticated MQTT. It maps configured decoder object
+paths to the mobile sensor schema, preserves LoRaWAN gateway/radio metadata,
+uses deterministic UUIDs for idempotent frame replay, and publishes directly
+into the revisioned SQLite change feed.
+
+Before enabling it:
+
+1. Create a dedicated least-privilege Mosquitto user.
+2. Copy `chirpstack-bindings.example.json` outside the repository and replace
+   its example DevEUI, field/site UUIDs, decoder paths, units, scaling, and
+   coordinates.
+3. Store only the MQTT password in a mode-0600 file outside the repository.
+4. Set `AETHER_CHIRPSTACK_BINDINGS_FILE`,
+   `AETHER_CHIRPSTACK_MQTT_PASSWORD_FILE`, and optionally
+   `AETHER_CHIRPSTACK_MQTT_USERNAME`.
+5. Start the profile with
+   `docker compose --profile chirpstack up -d --build`.
+
+The bridge shares only the field data volume and the existing internal
+`chirpstack_default` Docker network. It publishes no ports, runs read-only as a
+non-root user, and drops all Linux capabilities. Unconfigured DevEUIs and
+undecoded uplinks are ignored.
 
 ## Test
 

@@ -12,12 +12,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import ssl
 import tempfile
 import threading
 import urllib.parse
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-ALLOWED_ENTITY_TYPES = {
+MUTABLE_ENTITY_TYPES = {
     "property",
     "season",
     "field",
@@ -35,6 +37,16 @@ ALLOWED_ENTITY_TYPES = {
     "observation",
     "media",
     "alert",
+}
+PUBLISHED_ENTITY_TYPES = {"sensor_reading", "al_insight"}
+SENSOR_MEASUREMENTS = {
+    "soil_moisture",
+    "air_temperature",
+    "soil_temperature",
+    "humidity",
+    "water_level",
+    "conductivity",
+    "ph",
 }
 ALLOWED_OPERATIONS = {"create", "update", "delete"}
 MEDIA_EXTENSIONS = {
@@ -61,6 +73,157 @@ class ApiError(Exception):
         self.details = details
 
 
+def _published_payload_error(message: str) -> None:
+    raise ApiError(
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        "INVALID_PUBLISHED_PAYLOAD",
+        message,
+    )
+
+
+def _nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def _valid_uuid(value: Any, *, nullable: bool = False) -> bool:
+    if value is None:
+        return nullable
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _valid_datetime(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _valid_coordinate(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    latitude = value.get("latitude")
+    longitude = value.get("longitude")
+    if (
+        not _finite_number(latitude)
+        or not -90 <= latitude <= 90
+        or not _finite_number(longitude)
+        or not -180 <= longitude <= 180
+    ):
+        return False
+    for key in (
+        "altitudeMeters",
+        "horizontalAccuracyMeters",
+        "verticalAccuracyMeters",
+        "headingDegrees",
+    ):
+        item = value.get(key)
+        if item is not None and not _finite_number(item):
+            return False
+    if (
+        value.get("horizontalAccuracyMeters") is not None
+        and value["horizontalAccuracyMeters"] < 0
+    ) or (
+        value.get("verticalAccuracyMeters") is not None
+        and value["verticalAccuracyMeters"] < 0
+    ):
+        return False
+    heading = value.get("headingDegrees")
+    return heading is None or 0 <= heading <= 360
+
+
+def _valid_lorawan(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    if (
+        not _nonempty_string(value.get("applicationId"))
+        or not _nonempty_string(value.get("devEui"))
+        or isinstance(value.get("fPort"), bool)
+        or not isinstance(value.get("fPort"), int)
+        or not 0 <= value["fPort"] <= 255
+        or isinstance(value.get("frameCounter"), bool)
+        or not isinstance(value.get("frameCounter"), int)
+        or value["frameCounter"] < 0
+        or not isinstance(value.get("gatewayIds"), list)
+        or not all(isinstance(item, str) for item in value["gatewayIds"])
+    ):
+        return False
+    for key in ("rssi", "snr"):
+        if value.get(key) is not None and not _finite_number(value[key]):
+            return False
+    spreading_factor = value.get("spreadingFactor")
+    if spreading_factor is not None and (
+        isinstance(spreading_factor, bool)
+        or not isinstance(spreading_factor, int)
+    ):
+        return False
+    frequency = value.get("frequencyHz")
+    return frequency is None or (
+        not isinstance(frequency, bool)
+        and isinstance(frequency, int)
+        and frequency > 0
+    )
+
+
+def validate_published_payload(
+    entity_type: str, entity_id: str, payload: dict[str, Any]
+) -> None:
+    if not _valid_uuid(entity_id) or payload.get("id") != entity_id:
+        _published_payload_error("Published IDs must be matching UUIDs.")
+    if entity_type == "sensor_reading":
+        if (
+            not _nonempty_string(payload.get("deviceId"))
+            or not _valid_uuid(payload.get("fieldId"), nullable=True)
+            or not _valid_uuid(payload.get("siteId"), nullable=True)
+            or not _nonempty_string(payload.get("label"))
+            or payload.get("measurement") not in SENSOR_MEASUREMENTS
+            or not _finite_number(payload.get("value"))
+            or not _nonempty_string(payload.get("unit"))
+            or payload.get("quality") not in {"good", "estimated", "suspect"}
+            or not _valid_lorawan(payload.get("lorawan"))
+            or not _valid_coordinate(payload.get("coordinate"))
+            or not _valid_datetime(payload.get("recordedAt"))
+        ):
+            _published_payload_error(
+                "Sensor reading payload does not match the mobile schema."
+            )
+        return
+    if (
+        not _nonempty_string(payload.get("title"))
+        or not _nonempty_string(payload.get("summary"))
+        or not isinstance(payload.get("rationale"), str)
+        or not isinstance(payload.get("sourceReadingIds"), list)
+        or not all(_valid_uuid(item) for item in payload["sourceReadingIds"])
+        or not _valid_uuid(payload.get("fieldId"), nullable=True)
+        or not _valid_uuid(payload.get("siteId"), nullable=True)
+        or payload.get("severity") not in {"info", "attention"}
+        or not _valid_datetime(payload.get("generatedAt"))
+        or not _valid_datetime(payload.get("expiresAt"))
+        or payload.get("readOnly") is not True
+    ):
+        _published_payload_error(
+            "Al insight payload does not match the read-only mobile schema."
+        )
+
+
 @dataclass(frozen=True)
 class Mutation:
     id: str
@@ -81,7 +244,13 @@ class Mutation:
                 "INVALID_MUTATION",
                 "id, entityType, entityId, and operation are required strings.",
             )
-        if value["entityType"] not in ALLOWED_ENTITY_TYPES:
+        if value["entityType"] in PUBLISHED_ENTITY_TYPES:
+            raise ApiError(
+                HTTPStatus.FORBIDDEN,
+                "READ_ONLY_ENTITY",
+                f"{value['entityType']} records are publisher-managed and read-only.",
+            )
+        if value["entityType"] not in MUTABLE_ENTITY_TYPES:
             raise ApiError(
                 HTTPStatus.BAD_REQUEST,
                 "INVALID_ENTITY_TYPE",
@@ -115,6 +284,59 @@ class Mutation:
             operation=value["operation"],
             payload=value.get("payload"),
             base_revision=base_revision,
+        )
+
+
+@dataclass(frozen=True)
+class PublishedRecord:
+    entity_type: str
+    entity_id: str
+    operation: str
+    payload: Any
+
+    @classmethod
+    def from_json(cls, value: Any) -> "PublishedRecord":
+        if not isinstance(value, dict):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_PUBLISHED_RECORD",
+                "Expected a JSON object.",
+            )
+        entity_type = value.get("entityType")
+        entity_id = value.get("entityId")
+        operation = value.get("operation", "upsert")
+        if entity_type not in PUBLISHED_ENTITY_TYPES:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_PUBLISHED_ENTITY_TYPE",
+                f"Unsupported published entity type: {entity_type}",
+            )
+        if not isinstance(entity_id, str) or not entity_id or len(entity_id) > 128:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_PUBLISHED_RECORD",
+                "entityId must be a non-empty string no longer than 128 characters.",
+            )
+        if operation not in {"upsert", "delete"}:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_PUBLISHED_OPERATION",
+                "Published operation must be upsert or delete.",
+            )
+        payload = value.get("payload")
+        if operation == "upsert" and not isinstance(payload, dict):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_PUBLISHED_RECORD",
+                "Published upserts require an object payload.",
+            )
+        if operation == "upsert":
+            validate_published_payload(entity_type, entity_id, payload)
+        return cls(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            operation=operation,
+            payload=payload,
         )
 
 
@@ -331,6 +553,100 @@ class FieldStore:
         ]
         next_cursor = changes[-1]["cursor"] if changes else cursor
         return {"changes": changes, "nextCursor": next_cursor, "hasMore": len(changes) == limit}
+
+    def publish_record(
+        self, record: PublishedRecord, author_cn: str
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current_row = connection.execute(
+                "SELECT * FROM entities WHERE entity_type = ? AND entity_id = ?",
+                (record.entity_type, record.entity_id),
+            ).fetchone()
+            current = self._entity_from_row(current_row)
+            deleting = record.operation == "delete"
+            payload_json = (
+                None
+                if deleting
+                else json.dumps(record.payload, separators=(",", ":"), sort_keys=True)
+            )
+            unchanged = (
+                (deleting and (not current or current["deleted"]))
+                or (
+                    not deleting
+                    and current is not None
+                    and not current["deleted"]
+                    and current_row["payload_json"] == payload_json
+                )
+            )
+            if unchanged:
+                return {
+                    "accepted": True,
+                    "entityType": record.entity_type,
+                    "entityId": record.entity_id,
+                    "revision": current["revision"] if current else 0,
+                    "cursor": None,
+                    "serverUpdatedAt": current["updatedAt"] if current else now,
+                    "idempotentReplay": True,
+                }
+
+            revision = (current["revision"] if current else 0) + 1
+            change_operation = (
+                "delete"
+                if deleting
+                else "update"
+                if current and not current["deleted"]
+                else "create"
+            )
+            connection.execute(
+                """
+                INSERT INTO entities (
+                    entity_type, entity_id, revision, deleted, payload_json, updated_at, author_cn
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                    revision = excluded.revision,
+                    deleted = excluded.deleted,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at,
+                    author_cn = excluded.author_cn
+                """,
+                (
+                    record.entity_type,
+                    record.entity_id,
+                    revision,
+                    int(deleting),
+                    payload_json,
+                    now,
+                    author_cn,
+                ),
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO changes (
+                    entity_type, entity_id, revision, operation,
+                    payload_json, updated_at, author_cn
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.entity_type,
+                    record.entity_id,
+                    revision,
+                    change_operation,
+                    payload_json,
+                    now,
+                    author_cn,
+                ),
+            ).lastrowid
+            return {
+                "accepted": True,
+                "entityType": record.entity_type,
+                "entityId": record.entity_id,
+                "revision": revision,
+                "cursor": cursor,
+                "serverUpdatedAt": now,
+                "idempotentReplay": False,
+            }
 
     def media_record(self, media_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -571,13 +887,27 @@ class AetherFieldHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             author = self._author_cn()
-            if self.path != "/v1/mutations":
-                raise ApiError(HTTPStatus.NOT_FOUND, "NOT_FOUND", "No such endpoint.")
-            mutation = Mutation.from_json(self._read_json())
-            self._json(
-                HTTPStatus.OK,
-                self.field_server.store.apply_mutation(mutation, author),
-            )
+            if self.path == "/v1/mutations":
+                mutation = Mutation.from_json(self._read_json())
+                self._json(
+                    HTTPStatus.OK,
+                    self.field_server.store.apply_mutation(mutation, author),
+                )
+                return
+            if self.path == "/v1/published":
+                if author not in self.field_server.publisher_cns:
+                    raise ApiError(
+                        HTTPStatus.FORBIDDEN,
+                        "PUBLISHER_REQUIRED",
+                        "This client certificate is not authorized to publish read-only records.",
+                    )
+                record = PublishedRecord.from_json(self._read_json())
+                self._json(
+                    HTTPStatus.OK,
+                    self.field_server.store.publish_record(record, author),
+                )
+                return
+            raise ApiError(HTTPStatus.NOT_FOUND, "NOT_FOUND", "No such endpoint.")
         except ApiError as error:
             self._error(error)
 
@@ -637,11 +967,13 @@ class AetherFieldServer(ThreadingHTTPServer):
         *,
         max_json_bytes: int,
         max_media_bytes: int,
+        publisher_cns: frozenset[str],
     ):
         super().__init__(address, AetherFieldHandler)
         self.store = store
         self.max_json_bytes = max_json_bytes
         self.max_media_bytes = max_media_bytes
+        self.publisher_cns = publisher_cns
 
 
 def build_tls_context(
@@ -684,6 +1016,11 @@ def main() -> None:
         max_json_bytes=int(os.environ.get("AETHER_FIELD_MAX_JSON_BYTES", str(2 * 1024 * 1024))),
         max_media_bytes=int(
             os.environ.get("AETHER_FIELD_MAX_MEDIA_BYTES", str(512 * 1024 * 1024))
+        ),
+        publisher_cns=frozenset(
+            value.strip()
+            for value in os.environ.get("AETHER_FIELD_PUBLISHER_CNS", "Al").split(",")
+            if value.strip()
         ),
     )
     server.socket = build_tls_context(
