@@ -1,0 +1,31 @@
+{
+  "devices": {
+    "0102030405060708": {
+      "fieldId": "28f77310-f12d-4fd5-8097-3387e83fd49f",
+      "siteId": null,
+      "label": "Bed 4",
+      "coordinate": {
+        "latitude": 39.7411,
+        "longitude": -104.9949,
+        "altitudeMeters": 1609,
+        "horizontalAccuracyMeters": 3,
+        "verticalAccuracyMeters": 5,
+        "headingDegrees": null
+      },
+      "measurements": [
+        {
+          "key": "soil.moisture",
+          "measurement": "soil_moisture",
+          "unit": "%",
+          "label": "Bed 4 moisture",
+          "scale": 0.1
+        },
+        {
+          "key": "air.temperature",
+          "measurement": "air_temperature",
+          "unit": "°C"
+        }
+      ]
+    }
+  }
+}

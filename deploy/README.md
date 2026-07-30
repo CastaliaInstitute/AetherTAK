@@ -42,6 +42,7 @@ and LoRaWAN gateways:
 | --- | --- | --- |
 | TAK CoT TLS | `192.168.86.69:8089` | ATAK, iTAK, and AetherTAK clients |
 | TAK API | `192.168.86.69:8443` | Certificate-authenticated TAK API |
+| Aether Field API | `192.168.86.69:9443` | mTLS domain/media synchronization |
 | ChirpStack UI | `192.168.86.69:8080` | LoRaWAN administration |
 | MQTT | `192.168.86.69:1883` | Authenticated ChirpStack traffic |
 | Semtech UDP | `192.168.86.69:1700/udp` | Packet-forwarder gateways |
@@ -79,6 +80,12 @@ audit archive and CRL.
 
 The local AI identity is `Al` (case-sensitive). Its former lowercase
 certificate has been revoked and replaced.
+
+Only allowlisted service identities may publish read-only `sensor_reading` and
+`al_insight` records to the Aether Field API. Ordinary enrolled TAK clients can
+pull those records but cannot mutate them. The optional ChirpStack MQTT bridge
+uses a dedicated broker credential and per-DevEUI binding file; do not reuse a
+human TAK or broker administrator credential.
 
 ## Verification
 

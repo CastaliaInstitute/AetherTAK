@@ -1,0 +1,40 @@
+name: Aether Field API CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/field-api/**"
+      - "deploy/README.md"
+      - ".github/workflows/field-api.yml"
+  pull_request:
+    paths:
+      - "deploy/field-api/**"
+      - "deploy/README.md"
+      - ".github/workflows/field-api.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  field-api:
+    name: Field API and ChirpStack bridge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: deploy/field-api/requirements.txt
+      - run: python -m unittest -v
+        working-directory: deploy/field-api
+      - run: python -m py_compile aether_field_api.py chirpstack_bridge.py
+        working-directory: deploy/field-api
+      - run: docker build --tag aether-field-api-ci .
+        working-directory: deploy/field-api
+      - run: docker run --rm aether-field-api-ci python /app/aether_field_api.py --check
+      - run: >-
+          docker run --rm --entrypoint python aether-field-api-ci
+          -c "import paho.mqtt.client; import chirpstack_bridge; print('bridge runtime ready')"
