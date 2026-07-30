@@ -159,6 +159,159 @@ class FieldStoreTests(unittest.TestCase):
             "depthMetadata": None,
         }
 
+    @staticmethod
+    def portable_domain_payloads():
+        property_id = "7280b290-7607-4904-9004-ee767ac3cf84"
+        season_id = "0dc42b5e-bbef-4f0b-af46-124255111e98"
+        field_id = "28f77310-f12d-4fd5-8097-3387e83fd49f"
+        boundary = [
+            [-105.0, 40.0],
+            [-104.9, 40.0],
+            [-105.0, 40.1],
+            [-105.0, 40.0],
+        ]
+        coordinate = {
+            "latitude": 40.0,
+            "longitude": -105.0,
+            "altitudeMeters": None,
+            "horizontalAccuracyMeters": 3.0,
+            "verticalAccuracyMeters": None,
+            "headingDegrees": None,
+        }
+        return {
+            "property": {
+                "id": property_id,
+                "name": "Castalia Farm",
+                "description": "Local-first operational property",
+                "center": coordinate,
+                "boundary": boundary,
+                "timezone": "America/Denver",
+                "updatedAt": "2026-07-30T12:00:00.000Z",
+            },
+            "season": {
+                "id": season_id,
+                "propertyId": property_id,
+                "name": "2026 growing season",
+                "startsOn": "2026-04-01",
+                "endsOn": "2026-10-31",
+                "status": "active",
+                "notes": "",
+                "updatedAt": "2026-07-30T12:00:00.000Z",
+            },
+            "field": {
+                "id": field_id,
+                "propertyId": property_id,
+                "seasonId": season_id,
+                "name": "North field",
+                "crop": "Lettuce",
+                "cropIcon": "🥬",
+                "variety": "Butterhead",
+                "seasonLabel": "2026 growing season",
+                "status": "growing",
+                "healthScore": 88.0,
+                "boundary": boundary,
+                "updatedAt": "2026-07-30T12:00:00.000Z",
+            },
+            "ecological_site": {
+                "id": "b4eada9a-a0c8-4be5-9d87-922575f85c7d",
+                "propertyId": property_id,
+                "name": "Creek corridor",
+                "siteType": "riparian",
+                "targetCondition": "Stable banks and native cover",
+                "conditionScore": 74.0,
+                "center": coordinate,
+                "boundary": boundary,
+                "indicatorSpecies": ["Willow", "Red-winged blackbird"],
+                "updatedAt": "2026-07-30T12:00:00.000Z",
+            },
+            "alert": {
+                "id": "65e667e0-417e-4d99-9b6e-97f29cd2868e",
+                "severity": "warning",
+                "title": "Soil moisture low",
+                "detail": "North field is below its configured threshold.",
+                "fieldId": field_id,
+                "deviceId": "soil-probe-1",
+                "createdAt": "2026-07-30T12:00:00.000Z",
+                "acknowledgedAt": None,
+            },
+        }
+
+    def test_all_mutable_domain_payloads_are_validated_at_ingress(self):
+        for entity_type, payload in self.portable_domain_payloads().items():
+            with self.subTest(entity_type=entity_type):
+                mutation = Mutation.from_json(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "entityType": entity_type,
+                        "entityId": payload["id"],
+                        "operation": "create",
+                        "payload": payload,
+                    }
+                )
+                self.assertEqual(mutation.payload, payload)
+
+    def test_operational_entities_reject_open_or_out_of_range_boundaries(self):
+        for entity_type in ("property", "field", "ecological_site"):
+            for replacement in (
+                [
+                    [-105.0, 40.0],
+                    [-104.9, 40.0],
+                    [-105.0, 40.1],
+                ],
+                [
+                    [-181.0, 40.0],
+                    [-104.9, 40.0],
+                    [-105.0, 40.1],
+                    [-181.0, 40.0],
+                ],
+            ):
+                payload = self.portable_domain_payloads()[entity_type]
+                payload["boundary"] = replacement
+                with (
+                    self.subTest(
+                        entity_type=entity_type,
+                        boundary=replacement,
+                    ),
+                    self.assertRaises(ApiError) as caught,
+                ):
+                    Mutation.from_json(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "entityType": entity_type,
+                            "entityId": payload["id"],
+                            "operation": "create",
+                            "payload": payload,
+                        }
+                    )
+                self.assertEqual(
+                    caught.exception.code, "INVALID_MUTABLE_PAYLOAD"
+                )
+
+    def test_mutable_domain_ingress_rejects_unknown_or_invalid_fields(self):
+        cases = []
+        season = self.portable_domain_payloads()["season"]
+        season["privateNote"] = "must not enter shared sync"
+        cases.append(("season", season))
+        alert = self.portable_domain_payloads()["alert"]
+        alert["severity"] = "panic"
+        cases.append(("alert", alert))
+
+        for entity_type, payload in cases:
+            with (
+                self.subTest(entity_type=entity_type),
+                self.assertRaises(ApiError) as caught,
+            ):
+                Mutation.from_json(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "entityType": entity_type,
+                        "entityId": payload["id"],
+                        "operation": "create",
+                        "payload": payload,
+                    }
+                )
+            self.assertEqual(caught.exception.code, "INVALID_MUTABLE_PAYLOAD")
+
     def test_mobile_observation_and_media_payloads_are_validated_at_ingress(self):
         legacy_media = self.portable_media()
         legacy_media.pop("cameraCaptureEvidence")

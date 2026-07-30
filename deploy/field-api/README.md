@@ -51,12 +51,13 @@ Updates and deletes require `baseRevision`. A stale revision returns HTTP 409
 with the current server entity, allowing the mobile client to preserve both
 versions and mark a conflict rather than silently overwriting field data.
 
-Observation and portable media mutation payloads are schema-validated before
-they enter the shared change feed. IDs, coordinates, timestamps, evidence
-digests, depth metadata, and privacy-bounded camera capture evidence must match
-the mobile contracts. Raw EXIF and unknown fields are rejected. Legacy media
-without the optional camera evidence object remains readable and
-synchronizable.
+Every mobile-mutable property, season, field, ecological site, observation,
+media record, and operational alert is schema-validated before entering the
+shared change feed. IDs, bounded closed map geometry, coordinates, timestamps,
+domain enums, evidence digests, depth metadata, and privacy-bounded camera
+capture evidence must match the mobile contracts. Raw EXIF and unknown fields
+are rejected. Legacy media without the optional camera evidence object remains
+readable and synchronizable.
 
 Media uploads require `Content-Length` and `X-Aether-Sha256`. Optional
 `X-Aether-Observation-Id` and `X-Aether-Role` headers retain artifact context.

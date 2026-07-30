@@ -300,6 +300,34 @@ def _valid_depth_metadata(value: Any) -> bool:
     )
 
 
+def _valid_date(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 10:
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
+def _valid_operational_boundary(value: Any) -> bool:
+    if not isinstance(value, list) or not 4 <= len(value) <= 257:
+        return False
+    points: list[tuple[float, float]] = []
+    for point in value:
+        if (
+            not isinstance(point, list)
+            or len(point) != 2
+            or not _finite_number(point[0])
+            or not -180 <= point[0] <= 180
+            or not _finite_number(point[1])
+            or not -90 <= point[1] <= 90
+        ):
+            return False
+        points.append((point[0], point[1]))
+    return points[0] == points[-1] and len(set(points[:-1])) >= 3
+
+
 def validate_mutable_payload(
     entity_type: str, entity_id: str, payload: Any
 ) -> None:
@@ -307,6 +335,164 @@ def validate_mutable_payload(
         _mutable_payload_error("Mutable upserts require an object payload.")
     if not _valid_uuid(entity_id) or payload.get("id") != entity_id:
         _mutable_payload_error("Mutable IDs must be matching UUIDs.")
+
+    if entity_type == "property":
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "name",
+                    "description",
+                    "center",
+                    "boundary",
+                    "timezone",
+                    "updatedAt",
+                },
+            )
+            and _nonempty_string(payload.get("name"))
+            and isinstance(payload.get("description"), str)
+            and _valid_guardian_coordinate(payload.get("center"))
+            and _valid_operational_boundary(payload.get("boundary"))
+            and _nonempty_string(payload.get("timezone"))
+            and _valid_datetime(payload.get("updatedAt"))
+        )
+        if not valid:
+            _mutable_payload_error(
+                "Property payload does not match the mobile schema."
+            )
+        return
+
+    if entity_type == "season":
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "propertyId",
+                    "name",
+                    "startsOn",
+                    "endsOn",
+                    "status",
+                    "notes",
+                    "updatedAt",
+                },
+            )
+            and _valid_uuid(payload.get("propertyId"))
+            and _nonempty_string(payload.get("name"))
+            and _valid_date(payload.get("startsOn"))
+            and _valid_date(payload.get("endsOn"))
+            and payload.get("status") in {"planned", "active", "closed"}
+            and isinstance(payload.get("notes"), str)
+            and _valid_datetime(payload.get("updatedAt"))
+        )
+        if not valid:
+            _mutable_payload_error(
+                "Season payload does not match the mobile schema."
+            )
+        return
+
+    if entity_type == "field":
+        health_score = payload.get("healthScore")
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "propertyId",
+                    "seasonId",
+                    "name",
+                    "crop",
+                    "cropIcon",
+                    "variety",
+                    "seasonLabel",
+                    "status",
+                    "healthScore",
+                    "boundary",
+                    "updatedAt",
+                },
+            )
+            and _valid_uuid(payload.get("propertyId"))
+            and _valid_uuid(payload.get("seasonId"))
+            and _nonempty_string(payload.get("name"))
+            and _nonempty_string(payload.get("crop"))
+            and _nonempty_string(payload.get("cropIcon"))
+            and (
+                payload.get("variety") is None
+                or isinstance(payload.get("variety"), str)
+            )
+            and _nonempty_string(payload.get("seasonLabel"))
+            and payload.get("status")
+            in {"planned", "growing", "attention", "harvested"}
+            and (
+                health_score is None
+                or (
+                    _finite_number(health_score)
+                    and 0 <= health_score <= 100
+                )
+            )
+            and _valid_operational_boundary(payload.get("boundary"))
+            and _valid_datetime(payload.get("updatedAt"))
+        )
+        if not valid:
+            _mutable_payload_error(
+                "Field payload does not match the mobile schema."
+            )
+        return
+
+    if entity_type == "ecological_site":
+        condition_score = payload.get("conditionScore")
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "propertyId",
+                    "name",
+                    "siteType",
+                    "targetCondition",
+                    "conditionScore",
+                    "center",
+                    "boundary",
+                    "indicatorSpecies",
+                    "updatedAt",
+                },
+            )
+            and _valid_uuid(payload.get("propertyId"))
+            and _nonempty_string(payload.get("name"))
+            and payload.get("siteType")
+            in {
+                "riparian",
+                "wetland",
+                "woodland",
+                "grassland",
+                "pollinator",
+                "water",
+                "soil",
+                "other",
+            }
+            and isinstance(payload.get("targetCondition"), str)
+            and (
+                condition_score is None
+                or (
+                    _finite_number(condition_score)
+                    and 0 <= condition_score <= 100
+                )
+            )
+            and _valid_guardian_coordinate(payload.get("center"))
+            and _valid_operational_boundary(payload.get("boundary"))
+            and isinstance(payload.get("indicatorSpecies"), list)
+            and all(
+                isinstance(item, str)
+                for item in payload["indicatorSpecies"]
+            )
+            and _valid_datetime(payload.get("updatedAt"))
+        )
+        if not valid:
+            _mutable_payload_error(
+                "Ecological site payload does not match the mobile schema."
+            )
+        return
 
     if entity_type == "observation":
         valid = (
@@ -395,6 +581,43 @@ def validate_mutable_payload(
                 "Media payload does not match the portable mobile schema."
             )
         return
+
+    if entity_type == "alert":
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "severity",
+                    "title",
+                    "detail",
+                    "fieldId",
+                    "deviceId",
+                    "createdAt",
+                    "acknowledgedAt",
+                },
+            )
+            and payload.get("severity") in {"info", "warning", "critical"}
+            and _nonempty_string(payload.get("title"))
+            and isinstance(payload.get("detail"), str)
+            and _valid_uuid(payload.get("fieldId"), nullable=True)
+            and (
+                payload.get("deviceId") is None
+                or isinstance(payload.get("deviceId"), str)
+            )
+            and _valid_datetime(payload.get("createdAt"))
+            and (
+                payload.get("acknowledgedAt") is None
+                or _valid_datetime(payload.get("acknowledgedAt"))
+            )
+        )
+        if not valid:
+            _mutable_payload_error(
+                "Alert payload does not match the mobile schema."
+            )
+        return
+
+    _mutable_payload_error("Unsupported mutable payload.")
 
 
 def _valid_guardian_boundary(value: Any) -> bool:
