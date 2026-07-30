@@ -16,6 +16,68 @@ class FieldStoreTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    @staticmethod
+    def guardian_participant():
+        participant_id = "208176c4-c5fe-4dce-a774-4d7128db06c4"
+        return {
+            "id": participant_id,
+            "displayName": "River",
+            "mode": "child",
+            "team": "Castalia",
+            "state": "caution",
+            "zone": "Orchard",
+            "alertState": "warning",
+            "checkIn": "due",
+            "location": {
+                "coordinate": {
+                    "latitude": 39.7392,
+                    "longitude": -104.9903,
+                    "altitudeMeters": 1609.0,
+                    "horizontalAccuracyMeters": 8.0,
+                    "verticalAccuracyMeters": None,
+                    "headingDegrees": 75.0,
+                },
+                "source": "watch_gnss",
+                "confidence": "good",
+                "observedAt": "2026-07-30T08:15:00.000Z",
+            },
+            "device": {
+                "connectivity": "guardian_ble",
+                "lastContactAt": "2026-07-30T08:15:00.000Z",
+                "batteryPercent": 72.0,
+            },
+            "updatedAt": "2026-07-30T08:15:00.000Z",
+        }
+
+    @staticmethod
+    def guardian_alert():
+        return {
+            "id": "a62a3f50-b222-49e5-973a-0f5731d1ff8d",
+            "participantId": "208176c4-c5fe-4dce-a774-4d7128db06c4",
+            "ruleId": "check-in-overdue",
+            "severity": "warning",
+            "status": "active",
+            "reasonCode": "MISSED_CHECK_IN",
+            "title": "Check-in overdue",
+            "detail": "River has not checked in.",
+            "openedAt": "2026-07-30T08:10:00.000Z",
+            "acknowledgedAt": None,
+            "resolvedAt": None,
+            "resolutionReason": None,
+            "updatedAt": "2026-07-30T08:10:00.000Z",
+        }
+
+    def publish_guardian(self, entity_type, payload):
+        record = PublishedRecord.from_json(
+            {
+                "entityType": entity_type,
+                "entityId": payload["id"],
+                "operation": "upsert",
+                "payload": payload,
+            }
+        )
+        return self.store.publish_record(record, "Guardian Fusion")
+
     def test_idempotent_mutation_and_cursor_changes(self):
         mutation = Mutation(
             id="mutation-1",
@@ -59,8 +121,13 @@ class FieldStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "REVISION_CONFLICT")
         self.assertEqual(caught.exception.details["current"]["revision"], 2)
 
-    def test_sensor_and_al_entities_are_read_only_for_mobile_mutations(self):
-        for entity_type in ("sensor_reading", "al_insight"):
+    def test_publisher_managed_entities_are_read_only_for_mobile_mutations(self):
+        for entity_type in (
+            "sensor_reading",
+            "al_insight",
+            "guardian_participant",
+            "guardian_alert",
+        ):
             with self.subTest(entity_type=entity_type), self.assertRaises(ApiError) as caught:
                 Mutation.from_json(
                     {
@@ -72,6 +139,171 @@ class FieldStoreTests(unittest.TestCase):
                     }
                 )
             self.assertEqual(caught.exception.code, "READ_ONLY_ENTITY")
+
+    def test_guardian_participant_schema_rejects_biometric_leakage(self):
+        participant = self.guardian_participant()
+        participant["heartRate"] = 91
+        with self.assertRaises(ApiError) as caught:
+            PublishedRecord.from_json(
+                {
+                    "entityType": "guardian_participant",
+                    "entityId": participant["id"],
+                    "operation": "upsert",
+                    "payload": participant,
+                }
+            )
+        self.assertEqual(caught.exception.code, "INVALID_PUBLISHED_PAYLOAD")
+
+    def test_guardian_alert_schema_enforces_lifecycle(self):
+        alert = self.guardian_alert()
+        alert["status"] = "resolved"
+        with self.assertRaises(ApiError) as caught:
+            PublishedRecord.from_json(
+                {
+                    "entityType": "guardian_alert",
+                    "entityId": alert["id"],
+                    "operation": "upsert",
+                    "payload": alert,
+                }
+            )
+        self.assertEqual(caught.exception.code, "INVALID_PUBLISHED_PAYLOAD")
+
+    def test_guardian_actions_update_change_feed_and_replay_idempotently(self):
+        participant = self.guardian_participant()
+        alert = self.guardian_alert()
+        self.publish_guardian("guardian_participant", participant)
+        self.publish_guardian("guardian_alert", alert)
+
+        check_in_key = "122ed00d-6f35-4b49-b9cf-f8c7144303bd"
+        checked_in = self.store.apply_guardian_action(
+            idempotency_key=check_in_key,
+            action="check_in",
+            target_id=participant["id"],
+            reason=None,
+            observed_at="2026-07-30T08:20:00.000Z",
+            author_cn="Field One",
+        )
+        replay = self.store.apply_guardian_action(
+            idempotency_key=check_in_key,
+            action="check_in",
+            target_id=participant["id"],
+            reason=None,
+            observed_at="2026-07-30T08:20:00.000Z",
+            author_cn="Field One",
+        )
+        acknowledged = self.store.apply_guardian_action(
+            idempotency_key="acefbff6-7474-40c6-84d7-117702944808",
+            action="acknowledge",
+            target_id=alert["id"],
+            reason=None,
+            observed_at=None,
+            author_cn="Supervisor One",
+        )
+        resolved = self.store.apply_guardian_action(
+            idempotency_key="7ddc9244-4141-4169-9970-0853123804e7",
+            action="resolve",
+            target_id=alert["id"],
+            reason="Participant safely returned home.",
+            observed_at=None,
+            author_cn="Supervisor One",
+        )
+
+        self.assertEqual(
+            set(checked_in),
+            {
+                "accepted",
+                "idempotencyKey",
+                "action",
+                "targetId",
+                "serverTime",
+                "entityVersion",
+                "idempotentReplay",
+            },
+        )
+        self.assertTrue(replay["idempotentReplay"])
+        self.assertEqual(checked_in["entityVersion"], replay["entityVersion"])
+        self.assertEqual(acknowledged["entityVersion"], 2)
+        self.assertEqual(resolved["entityVersion"], 3)
+        participant_entity = self.store._entity_from_row(
+            self._entity_row("guardian_participant", participant["id"])
+        )
+        alert_entity = self.store._entity_from_row(
+            self._entity_row("guardian_alert", alert["id"])
+        )
+        self.assertEqual(participant_entity["payload"]["checkIn"], "current")
+        self.assertEqual(alert_entity["payload"]["status"], "resolved")
+        self.assertEqual(
+            alert_entity["payload"]["resolutionReason"],
+            "Participant safely returned home.",
+        )
+        changes = self.store.changes(0, 100)["changes"]
+        self.assertEqual(len(changes), 5)
+
+    def test_guardian_actions_reject_missing_targets_and_invalid_transitions(self):
+        with self.assertRaises(ApiError) as missing:
+            self.store.apply_guardian_action(
+                idempotency_key="bdd40a8e-9ce0-48e8-9e30-274b2f8236ef",
+                action="check_in",
+                target_id="6df2a29b-8d46-4a05-a647-f3a1ea659c13",
+                reason=None,
+                observed_at="2026-07-30T08:20:00.000Z",
+                author_cn="Field One",
+            )
+        self.assertEqual(missing.exception.code, "GUARDIAN_TARGET_NOT_FOUND")
+
+        alert = self.guardian_alert()
+        self.publish_guardian("guardian_alert", alert)
+        self.store.apply_guardian_action(
+            idempotency_key="1f70e41c-f21a-4094-84da-e781abce30bf",
+            action="resolve",
+            target_id=alert["id"],
+            reason="False alarm confirmed by supervisor.",
+            observed_at=None,
+            author_cn="Supervisor One",
+        )
+        with self.assertRaises(ApiError) as transition:
+            self.store.apply_guardian_action(
+                idempotency_key="d01408fc-d3dc-49e1-beef-30bdf52c62f0",
+                action="acknowledge",
+                target_id=alert["id"],
+                reason=None,
+                observed_at=None,
+                author_cn="Supervisor One",
+            )
+        self.assertEqual(transition.exception.code, "GUARDIAN_ALERT_RESOLVED")
+
+    def test_guardian_idempotency_key_cannot_change_target_or_body(self):
+        participant = self.guardian_participant()
+        self.publish_guardian("guardian_participant", participant)
+        key = "e4150473-14be-47f0-8cd8-e4215c1fa95e"
+        self.store.apply_guardian_action(
+            idempotency_key=key,
+            action="check_in",
+            target_id=participant["id"],
+            reason=None,
+            observed_at="2026-07-30T08:20:00.000Z",
+            author_cn="Field One",
+        )
+        with self.assertRaises(ApiError) as reused:
+            self.store.apply_guardian_action(
+                idempotency_key=key,
+                action="check_in",
+                target_id="6df2a29b-8d46-4a05-a647-f3a1ea659c13",
+                reason=None,
+                observed_at="2026-07-30T08:21:00.000Z",
+                author_cn="Field One",
+            )
+        self.assertEqual(reused.exception.code, "IDEMPOTENCY_KEY_REUSED")
+        with self.assertRaises(ApiError) as changed_body:
+            self.store.apply_guardian_action(
+                idempotency_key=key,
+                action="check_in",
+                target_id=participant["id"],
+                reason=None,
+                observed_at="2026-07-30T08:22:00.000Z",
+                author_cn="Field One",
+            )
+        self.assertEqual(changed_body.exception.code, "IDEMPOTENCY_KEY_REUSED")
 
     def test_rejects_published_payloads_that_could_poison_mobile_sync(self):
         with self.assertRaises(ApiError) as caught:

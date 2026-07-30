@@ -38,7 +38,12 @@ MUTABLE_ENTITY_TYPES = {
     "media",
     "alert",
 }
-PUBLISHED_ENTITY_TYPES = {"sensor_reading", "al_insight"}
+PUBLISHED_ENTITY_TYPES = {
+    "sensor_reading",
+    "al_insight",
+    "guardian_participant",
+    "guardian_alert",
+}
 SENSOR_MEASUREMENTS = {
     "soil_moisture",
     "air_temperature",
@@ -148,6 +153,24 @@ def _valid_coordinate(value: Any) -> bool:
     return heading is None or 0 <= heading <= 360
 
 
+def _exact_keys(value: Any, keys: set[str]) -> bool:
+    return isinstance(value, dict) and set(value) == keys
+
+
+def _valid_guardian_coordinate(value: Any) -> bool:
+    return _exact_keys(
+        value,
+        {
+            "latitude",
+            "longitude",
+            "altitudeMeters",
+            "horizontalAccuracyMeters",
+            "verticalAccuracyMeters",
+            "headingDegrees",
+        },
+    ) and _valid_coordinate(value)
+
+
 def _valid_lorawan(value: Any) -> bool:
     if value is None:
         return True
@@ -206,6 +229,166 @@ def validate_published_payload(
                 "Sensor reading payload does not match the mobile schema."
             )
         return
+    if entity_type == "al_insight":
+        if (
+            not _nonempty_string(payload.get("title"))
+            or not _nonempty_string(payload.get("summary"))
+            or not isinstance(payload.get("rationale"), str)
+            or not isinstance(payload.get("sourceReadingIds"), list)
+            or not all(_valid_uuid(item) for item in payload["sourceReadingIds"])
+            or not _valid_uuid(payload.get("fieldId"), nullable=True)
+            or not _valid_uuid(payload.get("siteId"), nullable=True)
+            or payload.get("severity") not in {"info", "attention"}
+            or not _valid_datetime(payload.get("generatedAt"))
+            or not _valid_datetime(payload.get("expiresAt"))
+            or payload.get("readOnly") is not True
+        ):
+            _published_payload_error(
+                "Al insight payload does not match the read-only mobile schema."
+            )
+        return
+    if entity_type == "guardian_participant":
+        location = payload.get("location")
+        device = payload.get("device")
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "displayName",
+                    "mode",
+                    "team",
+                    "state",
+                    "zone",
+                    "alertState",
+                    "checkIn",
+                    "location",
+                    "device",
+                    "updatedAt",
+                },
+            )
+            and isinstance(payload.get("displayName"), str)
+            and 1 <= len(payload["displayName"]) <= 120
+            and payload.get("mode") in {"child", "guest", "supervisor", "medical"}
+            and isinstance(payload.get("team"), str)
+            and 1 <= len(payload["team"]) <= 64
+            and payload.get("state") in {"normal", "caution", "critical", "offline"}
+            and (
+                payload.get("zone") is None
+                or (
+                    isinstance(payload.get("zone"), str)
+                    and len(payload["zone"]) <= 120
+                )
+            )
+            and payload.get("alertState") in {"none", "warning", "critical", "sos"}
+            and payload.get("checkIn") in {"current", "due", "missed", "not_required"}
+            and _exact_keys(
+                location, {"coordinate", "source", "confidence", "observedAt"}
+            )
+            and _valid_guardian_coordinate(location.get("coordinate"))
+            and location.get("source")
+            in {
+                "watch_gnss",
+                "ble_estimate",
+                "ble_presence",
+                "meshtastic",
+                "last_known",
+            }
+            and location.get("confidence") in {"good", "estimated", "poor", "stale"}
+            and _valid_datetime(location.get("observedAt"))
+            and _exact_keys(
+                device, {"connectivity", "lastContactAt", "batteryPercent"}
+            )
+            and device.get("connectivity")
+            in {
+                "watch_phone_wifi",
+                "watch_phone_cellular",
+                "guardian_ble",
+                "wifi",
+                "meshtastic",
+                "offline",
+            }
+            and _valid_datetime(device.get("lastContactAt"))
+            and (
+                device.get("batteryPercent") is None
+                or (
+                    _finite_number(device.get("batteryPercent"))
+                    and 0 <= device["batteryPercent"] <= 100
+                )
+            )
+            and _valid_datetime(payload.get("updatedAt"))
+        )
+        if not valid:
+            _published_payload_error(
+                "Guardian participant payload does not match the privacy-safe mobile schema."
+            )
+        return
+    if entity_type == "guardian_alert":
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "participantId",
+                    "ruleId",
+                    "severity",
+                    "status",
+                    "reasonCode",
+                    "title",
+                    "detail",
+                    "openedAt",
+                    "acknowledgedAt",
+                    "resolvedAt",
+                    "resolutionReason",
+                    "updatedAt",
+                },
+            )
+            and _valid_uuid(payload.get("participantId"))
+            and isinstance(payload.get("ruleId"), str)
+            and 1 <= len(payload["ruleId"]) <= 120
+            and payload.get("severity") in {"info", "warning", "critical"}
+            and payload.get("status") in {"active", "acknowledged", "resolved"}
+            and isinstance(payload.get("reasonCode"), str)
+            and 1 <= len(payload["reasonCode"]) <= 120
+            and isinstance(payload.get("title"), str)
+            and 1 <= len(payload["title"]) <= 160
+            and isinstance(payload.get("detail"), str)
+            and len(payload["detail"]) <= 500
+            and _valid_datetime(payload.get("openedAt"))
+            and (
+                payload.get("acknowledgedAt") is None
+                or _valid_datetime(payload.get("acknowledgedAt"))
+            )
+            and (
+                payload.get("resolvedAt") is None
+                or _valid_datetime(payload.get("resolvedAt"))
+            )
+            and (
+                payload.get("resolutionReason") is None
+                or (
+                    isinstance(payload.get("resolutionReason"), str)
+                    and len(payload["resolutionReason"]) <= 500
+                )
+            )
+            and _valid_datetime(payload.get("updatedAt"))
+        )
+        if valid and payload["status"] == "active":
+            valid = (
+                payload["acknowledgedAt"] is None and payload["resolvedAt"] is None
+            )
+        elif valid and payload["status"] == "acknowledged":
+            valid = payload["acknowledgedAt"] is not None
+        elif valid and payload["status"] == "resolved":
+            valid = (
+                payload["resolvedAt"] is not None
+                and isinstance(payload["resolutionReason"], str)
+                and bool(payload["resolutionReason"].strip())
+            )
+        if not valid:
+            _published_payload_error(
+                "Guardian alert payload does not match the mobile lifecycle schema."
+            )
+        return
     if (
         not _nonempty_string(payload.get("title"))
         or not _nonempty_string(payload.get("summary"))
@@ -219,9 +402,7 @@ def validate_published_payload(
         or not _valid_datetime(payload.get("expiresAt"))
         or payload.get("readOnly") is not True
     ):
-        _published_payload_error(
-            "Al insight payload does not match the read-only mobile schema."
-        )
+        _published_payload_error("Unsupported published payload.")
 
 
 @dataclass(frozen=True)
@@ -391,6 +572,15 @@ class FieldStore:
                 );
                 CREATE TABLE IF NOT EXISTS mutations (
                     mutation_id TEXT PRIMARY KEY,
+                    response_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    author_cn TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS guardian_actions (
+                    idempotency_key TEXT PRIMARY KEY,
+                    action TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
                     response_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     author_cn TEXT NOT NULL
@@ -647,6 +837,183 @@ class FieldStore:
                 "serverUpdatedAt": now,
                 "idempotentReplay": False,
             }
+
+    def apply_guardian_action(
+        self,
+        *,
+        idempotency_key: str,
+        action: str,
+        target_id: str,
+        reason: str | None,
+        observed_at: str | None,
+        author_cn: str,
+    ) -> dict[str, Any]:
+        if not _valid_uuid(idempotency_key) or not _valid_uuid(target_id):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_GUARDIAN_ACTION",
+                "Guardian action and target IDs must be UUIDs.",
+            )
+        if action not in {"check_in", "acknowledge", "resolve"}:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_GUARDIAN_ACTION",
+                "Unsupported Guardian action.",
+            )
+        if action == "check_in":
+            if reason is not None or not _valid_datetime(observed_at):
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "INVALID_GUARDIAN_ACTION",
+                    "Check-in requires one timezone-aware observedAt timestamp.",
+                )
+            entity_type = "guardian_participant"
+        else:
+            if observed_at is not None:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "INVALID_GUARDIAN_ACTION",
+                    "Alert actions do not accept observedAt.",
+                )
+            if action == "resolve" and (
+                not isinstance(reason, str) or not 3 <= len(reason.strip()) <= 500
+            ):
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "INVALID_GUARDIAN_ACTION",
+                    "Resolution reason must contain 3 to 500 characters.",
+                )
+            if action == "acknowledge" and reason is not None:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "INVALID_GUARDIAN_ACTION",
+                    "Acknowledgement does not accept a reason.",
+                )
+            entity_type = "guardian_alert"
+
+        now = utc_now()
+        request_json = json.dumps(
+            {"observedAt": observed_at} if action == "check_in" else
+            {"reason": reason.strip()} if action == "resolve" else {},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT action, target_id, request_json, response_json
+                FROM guardian_actions
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if prior:
+                if (
+                    prior["action"] != action
+                    or prior["target_id"] != target_id
+                    or prior["request_json"] != request_json
+                ):
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for another Guardian action.",
+                    )
+                response = json.loads(prior["response_json"])
+                response["idempotentReplay"] = True
+                return response
+
+            current_row = connection.execute(
+                """
+                SELECT * FROM entities
+                WHERE entity_type = ? AND entity_id = ? AND deleted = 0
+                """,
+                (entity_type, target_id),
+            ).fetchone()
+            current = self._entity_from_row(current_row)
+            if not current or not isinstance(current["payload"], dict):
+                raise ApiError(
+                    HTTPStatus.NOT_FOUND,
+                    "GUARDIAN_TARGET_NOT_FOUND",
+                    "The Guardian action target does not exist.",
+                )
+            payload = current["payload"]
+            if action == "check_in":
+                payload["checkIn"] = "current"
+            elif action == "acknowledge":
+                if payload.get("status") == "resolved":
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "GUARDIAN_ALERT_RESOLVED",
+                        "A resolved Guardian alert cannot be acknowledged.",
+                    )
+                if payload.get("status") != "active":
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "GUARDIAN_ALERT_ACKNOWLEDGED",
+                        "This Guardian alert is already acknowledged.",
+                    )
+                payload["status"] = "acknowledged"
+                payload["acknowledgedAt"] = now
+            else:
+                if payload.get("status") == "resolved":
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "GUARDIAN_ALERT_RESOLVED",
+                        "This Guardian alert is already resolved.",
+                    )
+                payload["status"] = "resolved"
+                payload["resolvedAt"] = now
+                payload["resolutionReason"] = reason.strip()
+            payload["updatedAt"] = now
+            validate_published_payload(entity_type, target_id, payload)
+
+            revision = current["revision"] + 1
+            payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            connection.execute(
+                """
+                UPDATE entities SET revision = ?, payload_json = ?, updated_at = ?,
+                    author_cn = ?
+                WHERE entity_type = ? AND entity_id = ?
+                """,
+                (revision, payload_json, now, author_cn, entity_type, target_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO changes (
+                    entity_type, entity_id, revision, operation, payload_json,
+                    updated_at, author_cn
+                ) VALUES (?, ?, ?, 'update', ?, ?, ?)
+                """,
+                (entity_type, target_id, revision, payload_json, now, author_cn),
+            )
+            response = {
+                "accepted": True,
+                "idempotencyKey": idempotency_key,
+                "action": action,
+                "targetId": target_id,
+                "serverTime": now,
+                "entityVersion": revision,
+                "idempotentReplay": False,
+            }
+            connection.execute(
+                """
+                INSERT INTO guardian_actions (
+                    idempotency_key, action, target_id, request_json, response_json,
+                    created_at, author_cn
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    idempotency_key,
+                    action,
+                    target_id,
+                    request_json,
+                    json.dumps(response, separators=(",", ":"), sort_keys=True),
+                    now,
+                    author_cn,
+                ),
+            )
+            return response
 
     def media_record(self, media_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -907,6 +1274,85 @@ class AetherFieldHandler(BaseHTTPRequestHandler):
                     self.field_server.store.publish_record(record, author),
                 )
                 return
+            parsed = urllib.parse.urlparse(self.path)
+            participant_prefix = "/guardian/v1/participants/"
+            alert_prefix = "/guardian/v1/alerts/"
+            if (
+                parsed.path.startswith(participant_prefix)
+                and parsed.path.endswith("/check-ins")
+            ):
+                if author not in (
+                    self.field_server.guardian_checkin_cns
+                    | self.field_server.guardian_supervisor_cns
+                ):
+                    raise ApiError(
+                        HTTPStatus.FORBIDDEN,
+                        "GUARDIAN_CHECKIN_REQUIRED",
+                        "This client certificate is not authorized for Guardian check-ins.",
+                    )
+                target_id = urllib.parse.unquote(
+                    parsed.path[
+                        len(participant_prefix) : -len("/check-ins")
+                    ]
+                )
+                body = self._read_json()
+                if not _exact_keys(body, {"observedAt"}):
+                    raise ApiError(
+                        HTTPStatus.BAD_REQUEST,
+                        "INVALID_GUARDIAN_ACTION",
+                        "Check-in body must contain only observedAt.",
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    self.field_server.store.apply_guardian_action(
+                        idempotency_key=self.headers.get("Idempotency-Key", ""),
+                        action="check_in",
+                        target_id=target_id,
+                        reason=None,
+                        observed_at=body["observedAt"],
+                        author_cn=author,
+                    ),
+                )
+                return
+            if parsed.path.startswith(alert_prefix) and (
+                parsed.path.endswith(":acknowledge")
+                or parsed.path.endswith(":resolve")
+            ):
+                if author not in self.field_server.guardian_supervisor_cns:
+                    raise ApiError(
+                        HTTPStatus.FORBIDDEN,
+                        "GUARDIAN_SUPERVISOR_REQUIRED",
+                        "This client certificate is not authorized to manage Guardian alerts.",
+                    )
+                action = (
+                    "acknowledge"
+                    if parsed.path.endswith(":acknowledge")
+                    else "resolve"
+                )
+                suffix = f":{action}"
+                target_id = urllib.parse.unquote(
+                    parsed.path[len(alert_prefix) : -len(suffix)]
+                )
+                body = self._read_json()
+                expected_keys = set() if action == "acknowledge" else {"reason"}
+                if not _exact_keys(body, expected_keys):
+                    raise ApiError(
+                        HTTPStatus.BAD_REQUEST,
+                        "INVALID_GUARDIAN_ACTION",
+                        f"Invalid Guardian {action} body.",
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    self.field_server.store.apply_guardian_action(
+                        idempotency_key=self.headers.get("Idempotency-Key", ""),
+                        action=action,
+                        target_id=target_id,
+                        reason=body.get("reason"),
+                        observed_at=None,
+                        author_cn=author,
+                    ),
+                )
+                return
             raise ApiError(HTTPStatus.NOT_FOUND, "NOT_FOUND", "No such endpoint.")
         except ApiError as error:
             self._error(error)
@@ -968,12 +1414,16 @@ class AetherFieldServer(ThreadingHTTPServer):
         max_json_bytes: int,
         max_media_bytes: int,
         publisher_cns: frozenset[str],
+        guardian_checkin_cns: frozenset[str],
+        guardian_supervisor_cns: frozenset[str],
     ):
         super().__init__(address, AetherFieldHandler)
         self.store = store
         self.max_json_bytes = max_json_bytes
         self.max_media_bytes = max_media_bytes
         self.publisher_cns = publisher_cns
+        self.guardian_checkin_cns = guardian_checkin_cns
+        self.guardian_supervisor_cns = guardian_supervisor_cns
 
 
 def build_tls_context(
@@ -1020,6 +1470,20 @@ def main() -> None:
         publisher_cns=frozenset(
             value.strip()
             for value in os.environ.get("AETHER_FIELD_PUBLISHER_CNS", "Al").split(",")
+            if value.strip()
+        ),
+        guardian_checkin_cns=frozenset(
+            value.strip()
+            for value in os.environ.get(
+                "AETHER_GUARDIAN_CHECKIN_CNS", ""
+            ).split(",")
+            if value.strip()
+        ),
+        guardian_supervisor_cns=frozenset(
+            value.strip()
+            for value in os.environ.get(
+                "AETHER_GUARDIAN_SUPERVISOR_CNS", ""
+            ).split(",")
             if value.strip()
         ),
     )

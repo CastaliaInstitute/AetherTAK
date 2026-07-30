@@ -32,8 +32,14 @@ entire TAK certificate workspace because it contains CA private keys.
 ## Protocol
 
 - `POST /v1/mutations` applies an idempotent domain mutation.
-- `POST /v1/published` upserts or deletes publisher-managed sensor readings and
-  read-only Al insights.
+- `POST /v1/published` upserts or deletes publisher-managed sensor readings,
+  read-only Al insights, Guardian participants, and Guardian alerts.
+- `POST /guardian/v1/participants/{id}/check-ins` records a participant
+  check-in.
+- `POST /guardian/v1/alerts/{id}:acknowledge` acknowledges an active Guardian
+  alert.
+- `POST /guardian/v1/alerts/{id}:resolve` resolves an active or acknowledged
+  Guardian alert with a reason.
 - `GET /v1/changes?cursor=0&limit=100` returns ordered remote changes.
 - `PUT /v1/media/{mediaId}` streams a media artifact.
 - `GET /v1/media/{mediaId}` downloads an indexed media artifact.
@@ -50,12 +56,13 @@ clients must validate all three before committing a file to offline storage.
 
 ## Read-only publishers
 
-`sensor_reading` and `al_insight` records can never be submitted through the
-mobile mutation endpoint. They enter the same ordered change feed through
-`POST /v1/published`, which additionally requires the client certificate common
-name to appear in `AETHER_FIELD_PUBLISHER_CNS`. The default allowlist contains
-only the case-sensitive local AI identity `Al`; use a distinct service
-certificate before adding a ChirpStack bridge identity.
+`sensor_reading`, `al_insight`, `guardian_participant`, and `guardian_alert`
+records can never be submitted through the mobile mutation endpoint. They enter
+the same ordered change feed through `POST /v1/published`, which additionally
+requires the client certificate common name to appear in
+`AETHER_FIELD_PUBLISHER_CNS`. The default allowlist contains only the
+case-sensitive local AI identity `Al`; use a distinct service certificate
+before adding a ChirpStack or Guardian Fusion publisher identity.
 
 An upsert body has this shape:
 
@@ -72,6 +79,29 @@ The payload must conform to the AetherTAK Field mobile schema. Replaying the
 same canonical payload is idempotent and does not advance the change cursor.
 Use `"operation": "delete"` to publish a tombstone. Publisher requests still
 require mutual TLS and are rejected with HTTP 403 for ordinary TAK users.
+
+## Guardian actions
+
+Guardian participant and alert snapshots use exact-key schemas. Unknown fields,
+including raw biometrics, are rejected so they cannot leak into the routine
+mobile roster. A Guardian publisher may retain richer protected telemetry
+outside this API and publish only the operational state needed by TAK clients.
+
+Every action requires a UUID `Idempotency-Key` header. The same key and body
+return the original receipt without generating another change; reusing a key
+for a different target or body returns HTTP 409. Check-in bodies contain only
+`observedAt`; acknowledge bodies are empty objects; resolution bodies contain
+only a 3–500 character `reason`.
+
+Certificate authorization is fail-closed:
+
+- `AETHER_GUARDIAN_CHECKIN_CNS` allows participant check-ins.
+- `AETHER_GUARDIAN_SUPERVISOR_CNS` allows check-ins plus alert acknowledgement
+  and resolution.
+
+Both are comma-separated, case-sensitive certificate common-name allowlists
+and default to empty. Give supervisors distinct TAK client certificates; do not
+authorize a shared server or publisher identity for interactive actions.
 
 ## ChirpStack bridge
 
