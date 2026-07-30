@@ -58,7 +58,8 @@ clients must validate all three before committing a file to offline storage.
 
 ## Read-only publishers
 
-`sensor_reading`, `al_insight`, `guardian_participant`, and `guardian_alert`
+`sensor_reading`, `al_insight`, `guardian_participant`, `guardian_alert`, and
+`guardian_zone`
 records can never be submitted through the mobile mutation endpoint. They enter
 the same ordered change feed through `POST /v1/published`, which additionally
 requires the client certificate common name to appear in

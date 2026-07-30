@@ -43,6 +43,7 @@ PUBLISHED_ENTITY_TYPES = {
     "al_insight",
     "guardian_participant",
     "guardian_alert",
+    "guardian_zone",
 }
 SENSOR_MEASUREMENTS = {
     "soil_moisture",
@@ -198,6 +199,24 @@ def _valid_guardian_coordinate(value: Any) -> bool:
     ) and _valid_coordinate(value)
 
 
+def _valid_guardian_boundary(value: Any) -> bool:
+    if not isinstance(value, list) or not 4 <= len(value) <= 257:
+        return False
+    points: list[tuple[float, float]] = []
+    for point in value:
+        if (
+            not isinstance(point, list)
+            or len(point) != 2
+            or not _finite_number(point[0])
+            or not -180 <= point[0] <= 180
+            or not _finite_number(point[1])
+            or not -90 <= point[1] <= 90
+        ):
+            return False
+        points.append((point[0], point[1]))
+    return points[0] == points[-1] and len(set(points[:-1])) >= 3
+
+
 def _valid_lorawan(value: Any) -> bool:
     if value is None:
         return True
@@ -348,6 +367,41 @@ def validate_published_payload(
         if not valid:
             _published_payload_error(
                 "Guardian participant payload does not match the privacy-safe mobile schema."
+            )
+        return
+    if entity_type == "guardian_zone":
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "propertyId",
+                    "name",
+                    "level",
+                    "boundary",
+                    "enterDwellSeconds",
+                    "exitDwellSeconds",
+                    "active",
+                    "updatedAt",
+                },
+            )
+            and _valid_uuid(payload.get("propertyId"))
+            and isinstance(payload.get("name"), str)
+            and 1 <= len(payload["name"]) <= 120
+            and payload.get("level") in {"green", "yellow", "red"}
+            and _valid_guardian_boundary(payload.get("boundary"))
+            and not isinstance(payload.get("enterDwellSeconds"), bool)
+            and isinstance(payload.get("enterDwellSeconds"), int)
+            and 0 <= payload["enterDwellSeconds"] <= 86_400
+            and not isinstance(payload.get("exitDwellSeconds"), bool)
+            and isinstance(payload.get("exitDwellSeconds"), int)
+            and 0 <= payload["exitDwellSeconds"] <= 86_400
+            and isinstance(payload.get("active"), bool)
+            and _valid_datetime(payload.get("updatedAt"))
+        )
+        if not valid:
+            _published_payload_error(
+                "Guardian zone payload does not match the privacy-safe mobile schema."
             )
         return
     if entity_type == "guardian_alert":

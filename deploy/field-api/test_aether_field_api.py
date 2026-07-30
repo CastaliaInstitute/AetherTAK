@@ -73,6 +73,25 @@ class FieldStoreTests(unittest.TestCase):
             "updatedAt": "2026-07-30T08:10:00.000Z",
         }
 
+    @staticmethod
+    def guardian_zone():
+        return {
+            "id": "51cc59ca-7298-4b28-8105-702010cdcc71",
+            "propertyId": "e969f10f-9a45-4964-9646-d8f3dc10d506",
+            "name": "Creek caution area",
+            "level": "yellow",
+            "boundary": [
+                [-104.9917, 39.7418],
+                [-104.9887, 39.7413],
+                [-104.9892, 39.7388],
+                [-104.9917, 39.7418],
+            ],
+            "enterDwellSeconds": 10,
+            "exitDwellSeconds": 30,
+            "active": True,
+            "updatedAt": "2026-07-30T08:10:00.000Z",
+        }
+
     def publish_guardian(self, entity_type, payload):
         record = PublishedRecord.from_json(
             {
@@ -163,6 +182,7 @@ class FieldStoreTests(unittest.TestCase):
             "al_insight",
             "guardian_participant",
             "guardian_alert",
+            "guardian_zone",
         ):
             with self.subTest(entity_type=entity_type), self.assertRaises(ApiError) as caught:
                 Mutation.from_json(
@@ -200,6 +220,30 @@ class FieldStoreTests(unittest.TestCase):
                     "entityId": alert["id"],
                     "operation": "upsert",
                     "payload": alert,
+                }
+            )
+        self.assertEqual(caught.exception.code, "INVALID_PUBLISHED_PAYLOAD")
+
+    def test_guardian_zone_schema_is_strict_and_requires_closed_geometry(self):
+        zone = self.guardian_zone()
+        record = PublishedRecord.from_json(
+            {
+                "entityType": "guardian_zone",
+                "entityId": zone["id"],
+                "operation": "upsert",
+                "payload": zone,
+            }
+        )
+        self.assertEqual(record.payload["level"], "yellow")
+
+        zone["boundary"] = zone["boundary"][:-1]
+        with self.assertRaises(ApiError) as caught:
+            PublishedRecord.from_json(
+                {
+                    "entityType": "guardian_zone",
+                    "entityId": zone["id"],
+                    "operation": "upsert",
+                    "payload": zone,
                 }
             )
         self.assertEqual(caught.exception.code, "INVALID_PUBLISHED_PAYLOAD")
