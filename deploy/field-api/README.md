@@ -32,6 +32,8 @@ entire TAK certificate workspace because it contains CA private keys.
 ## Protocol
 
 - `POST /v1/mutations` applies an idempotent domain mutation.
+- `GET /v1/identity` reports the authenticated certificate common name and
+  effective publisher/Guardian roles for the requesting client.
 - `POST /v1/published` upserts or deletes publisher-managed sensor readings,
   read-only Al insights, Guardian participants, and Guardian alerts.
 - `POST /guardian/v1/participants/{id}/check-ins` records a participant
@@ -102,6 +104,8 @@ Certificate authorization is fail-closed:
 Both are comma-separated, case-sensitive certificate common-name allowlists
 and default to empty. Give supervisors distinct TAK client certificates; do not
 authorize a shared server or publisher identity for interactive actions.
+An enrolled client can query `/v1/identity` to confirm its exact common name
+and effective roles without exposing certificate or private-key material.
 
 ## ChirpStack bridge
 

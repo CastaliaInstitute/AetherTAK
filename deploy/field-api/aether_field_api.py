@@ -120,6 +120,33 @@ def _valid_datetime(value: Any) -> bool:
         return False
 
 
+def field_identity(
+    common_name: str,
+    *,
+    publisher_cns: frozenset[str],
+    guardian_checkin_cns: frozenset[str],
+    guardian_supervisor_cns: frozenset[str],
+) -> dict[str, Any]:
+    if not common_name or len(common_name) > 128:
+        raise ApiError(
+            HTTPStatus.UNAUTHORIZED,
+            "CLIENT_IDENTITY_INVALID",
+            "The client certificate common name is invalid.",
+        )
+    supervisor = common_name in guardian_supervisor_cns
+    return {
+        "authenticated": True,
+        "commonName": common_name,
+        "permissions": {
+            "publisher": common_name in publisher_cns,
+            "guardianCheckIn": (
+                common_name in guardian_checkin_cns or supervisor
+            ),
+            "guardianSupervisor": supervisor,
+        },
+    }
+
+
 def _valid_coordinate(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
@@ -1217,10 +1244,23 @@ class AetherFieldHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
-            self._author_cn()
+            author = self._author_cn()
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/healthz":
                 self._json(HTTPStatus.OK, {"status": "ok", "time": utc_now()})
+                return
+            if parsed.path == "/v1/identity":
+                self._json(
+                    HTTPStatus.OK,
+                    field_identity(
+                        author,
+                        publisher_cns=self.field_server.publisher_cns,
+                        guardian_checkin_cns=self.field_server.guardian_checkin_cns,
+                        guardian_supervisor_cns=(
+                            self.field_server.guardian_supervisor_cns
+                        ),
+                    ),
+                )
                 return
             if parsed.path == "/v1/changes":
                 query = urllib.parse.parse_qs(parsed.query)

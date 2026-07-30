@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aether_field_api import ApiError, FieldStore, Mutation, PublishedRecord
+from aether_field_api import (
+    ApiError,
+    FieldStore,
+    Mutation,
+    PublishedRecord,
+    field_identity,
+)
 
 
 class FieldStoreTests(unittest.TestCase):
@@ -96,6 +102,36 @@ class FieldStoreTests(unittest.TestCase):
         page = self.store.changes(0, 100)
         self.assertEqual(len(page["changes"]), 1)
         self.assertEqual(page["nextCursor"], first["cursor"])
+
+    def test_field_identity_reports_effective_certificate_roles(self):
+        identity = field_identity(
+            "Field Supervisor",
+            publisher_cns=frozenset({"Al"}),
+            guardian_checkin_cns=frozenset({"Field Participant"}),
+            guardian_supervisor_cns=frozenset({"Field Supervisor"}),
+        )
+        self.assertEqual(
+            identity,
+            {
+                "authenticated": True,
+                "commonName": "Field Supervisor",
+                "permissions": {
+                    "publisher": False,
+                    "guardianCheckIn": True,
+                    "guardianSupervisor": True,
+                },
+            },
+        )
+
+    def test_field_identity_is_bounded(self):
+        with self.assertRaises(ApiError) as caught:
+            field_identity(
+                "x" * 129,
+                publisher_cns=frozenset(),
+                guardian_checkin_cns=frozenset(),
+                guardian_supervisor_cns=frozenset(),
+            )
+        self.assertEqual(caught.exception.code, "CLIENT_IDENTITY_INVALID")
 
     def test_stale_update_returns_current_entity(self):
         created = self.store.apply_mutation(
