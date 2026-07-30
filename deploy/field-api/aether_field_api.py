@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import ssl
 import tempfile
@@ -83,6 +84,14 @@ def _published_payload_error(message: str) -> None:
     raise ApiError(
         HTTPStatus.UNPROCESSABLE_ENTITY,
         "INVALID_PUBLISHED_PAYLOAD",
+        message,
+    )
+
+
+def _mutable_payload_error(message: str) -> None:
+    raise ApiError(
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        "INVALID_MUTABLE_PAYLOAD",
         message,
     )
 
@@ -197,6 +206,195 @@ def _valid_guardian_coordinate(value: Any) -> bool:
             "headingDegrees",
         },
     ) and _valid_coordinate(value)
+
+
+def _valid_camera_capture_evidence(value: Any) -> bool:
+    keys = {
+        "captureRequestedAt",
+        "captureCompletedAt",
+        "locationObservedAt",
+        "metadataCreatedAt",
+        "sizeBytes",
+        "durationSeconds",
+        "widthPixels",
+        "heightPixels",
+        "format",
+    }
+    if not _exact_keys(value, keys):
+        return False
+    if (
+        not _valid_datetime(value["captureRequestedAt"])
+        or not _valid_datetime(value["captureCompletedAt"])
+        or not _valid_datetime(value["locationObservedAt"])
+        or (
+            value["metadataCreatedAt"] is not None
+            and not _valid_datetime(value["metadataCreatedAt"])
+        )
+    ):
+        return False
+    if (
+        datetime.fromisoformat(
+            value["captureCompletedAt"].replace("Z", "+00:00")
+        )
+        < datetime.fromisoformat(
+            value["captureRequestedAt"].replace("Z", "+00:00")
+        )
+    ):
+        return False
+    for key in ("sizeBytes", "widthPixels", "heightPixels"):
+        item = value[key]
+        if item is not None and (
+            isinstance(item, bool) or not isinstance(item, int) or item <= 0
+        ):
+            return False
+    duration = value["durationSeconds"]
+    if duration is not None and (
+        not _finite_number(duration) or duration < 0
+    ):
+        return False
+    media_format = value["format"]
+    return media_format is None or (
+        isinstance(media_format, str)
+        and re.fullmatch(r"[a-z0-9][a-z0-9.+-]{0,31}", media_format) is not None
+    )
+
+
+def _valid_depth_measurements(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    for measurement in value:
+        if (
+            not _exact_keys(
+                measurement, {"label", "value", "unit", "uncertainty"}
+            )
+            or not _nonempty_string(measurement["label"])
+            or not _finite_number(measurement["value"])
+            or measurement["value"] < 0
+            or measurement["unit"] not in {"m", "m2", "m3"}
+            or (
+                measurement["uncertainty"] is not None
+                and (
+                    not _finite_number(measurement["uncertainty"])
+                    or measurement["uncertainty"] < 0
+                )
+            )
+        ):
+            return False
+    return True
+
+
+def _valid_depth_metadata(value: Any) -> bool:
+    return (
+        _exact_keys(
+            value, {"scanId", "provider", "role", "measurements"}
+        )
+        and _valid_uuid(value["scanId"])
+        and value["provider"] in {"arkit-lidar", "arcore-depth"}
+        and value["role"] in {
+            "depth",
+            "confidence",
+            "point_cloud",
+            "model",
+        }
+        and _valid_depth_measurements(value["measurements"])
+    )
+
+
+def validate_mutable_payload(
+    entity_type: str, entity_id: str, payload: Any
+) -> None:
+    if not isinstance(payload, dict):
+        _mutable_payload_error("Mutable upserts require an object payload.")
+    if not _valid_uuid(entity_id) or payload.get("id") != entity_id:
+        _mutable_payload_error("Mutable IDs must be matching UUIDs.")
+
+    if entity_type == "observation":
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "id",
+                    "siteId",
+                    "fieldId",
+                    "category",
+                    "title",
+                    "notes",
+                    "coordinate",
+                    "observedAt",
+                    "mediaIds",
+                },
+            )
+            and _valid_uuid(payload.get("siteId"), nullable=True)
+            and _valid_uuid(payload.get("fieldId"), nullable=True)
+            and payload.get("category")
+            in {"crop", "species", "habitat", "water", "soil", "damage"}
+            and _nonempty_string(payload.get("title"))
+            and isinstance(payload.get("notes"), str)
+            and _valid_guardian_coordinate(payload.get("coordinate"))
+            and _valid_datetime(payload.get("observedAt"))
+            and isinstance(payload.get("mediaIds"), list)
+            and all(_valid_uuid(item) for item in payload["mediaIds"])
+        )
+        if not valid:
+            _mutable_payload_error(
+                "Observation payload does not match the mobile schema."
+            )
+        return
+
+    if entity_type == "media":
+        allowed_keys = {
+            "id",
+            "observationId",
+            "kind",
+            "mimeType",
+            "coordinate",
+            "capturedAt",
+            "deviceModel",
+            "sha256",
+            "depthMetadata",
+        }
+        if "cameraCaptureEvidence" in payload:
+            allowed_keys.add("cameraCaptureEvidence")
+        digest = payload.get("sha256")
+        evidence = payload.get("cameraCaptureEvidence")
+        depth = payload.get("depthMetadata")
+        valid = (
+            _exact_keys(payload, allowed_keys)
+            and _valid_uuid(payload.get("observationId"), nullable=True)
+            and payload.get("kind")
+            in {
+                "photo",
+                "video",
+                "depth",
+                "depth_confidence",
+                "point_cloud",
+                "model",
+            }
+            and _nonempty_string(payload.get("mimeType"))
+            and _valid_guardian_coordinate(payload.get("coordinate"))
+            and _valid_datetime(payload.get("capturedAt"))
+            and (
+                payload.get("deviceModel") is None
+                or isinstance(payload.get("deviceModel"), str)
+            )
+            and (
+                digest is None
+                or (
+                    isinstance(digest, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+                )
+            )
+            and (
+                evidence is None
+                or _valid_camera_capture_evidence(evidence)
+            )
+            and (depth is None or _valid_depth_metadata(depth))
+        )
+        if not valid:
+            _mutable_payload_error(
+                "Media payload does not match the portable mobile schema."
+            )
+        return
 
 
 def _valid_guardian_boundary(value: Any) -> bool:
@@ -539,12 +737,17 @@ class Mutation:
                 "REVISION_REQUIRED",
                 "Updates and deletes require baseRevision.",
             )
+        payload = value.get("payload")
+        if value["operation"] != "delete":
+            validate_mutable_payload(
+                value["entityType"], value["entityId"], payload
+            )
         return cls(
             id=value["id"],
             entity_type=value["entityType"],
             entity_id=value["entityId"],
             operation=value["operation"],
-            payload=value.get("payload"),
+            payload=payload,
             base_revision=base_revision,
         )
 

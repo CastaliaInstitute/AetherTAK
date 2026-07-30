@@ -2,6 +2,7 @@ import hashlib
 import io
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 from aether_field_api import (
@@ -102,6 +103,141 @@ class FieldStoreTests(unittest.TestCase):
             }
         )
         return self.store.publish_record(record, "Guardian Fusion")
+
+    @staticmethod
+    def portable_observation():
+        observation_id = "87e11f1d-5fca-4dd5-b17c-5d8923beac50"
+        return {
+            "id": observation_id,
+            "siteId": None,
+            "fieldId": "28f77310-f12d-4fd5-8097-3387e83fd49f",
+            "category": "crop",
+            "title": "Canopy check",
+            "notes": "Structured field evidence",
+            "coordinate": {
+                "latitude": 39.7411,
+                "longitude": -104.9949,
+                "altitudeMeters": 1609.0,
+                "horizontalAccuracyMeters": 3.0,
+                "verticalAccuracyMeters": 5.0,
+                "headingDegrees": None,
+            },
+            "observedAt": "2026-07-30T12:00:00.000Z",
+            "mediaIds": ["cd89c88b-85d5-47a1-8d79-bd1081d172b7"],
+        }
+
+    @staticmethod
+    def portable_media():
+        media_id = "cd89c88b-85d5-47a1-8d79-bd1081d172b7"
+        return {
+            "id": media_id,
+            "observationId": "87e11f1d-5fca-4dd5-b17c-5d8923beac50",
+            "kind": "video",
+            "mimeType": "video/mp4",
+            "coordinate": {
+                "latitude": 39.7411,
+                "longitude": -104.9949,
+                "altitudeMeters": 1609.0,
+                "horizontalAccuracyMeters": 3.0,
+                "verticalAccuracyMeters": 5.0,
+                "headingDegrees": None,
+            },
+            "capturedAt": "2026-07-30T12:00:00.000Z",
+            "deviceModel": "Pixel 10 Pro",
+            "sha256": "a" * 64,
+            "cameraCaptureEvidence": {
+                "captureRequestedAt": "2026-07-30T11:59:50.000Z",
+                "captureCompletedAt": "2026-07-30T12:00:00.000Z",
+                "locationObservedAt": "2026-07-30T11:59:51.000Z",
+                "metadataCreatedAt": "2026-07-30T11:59:52.000Z",
+                "sizeBytes": 12_345_678,
+                "durationSeconds": 7.25,
+                "widthPixels": 1920,
+                "heightPixels": 1080,
+                "format": "mp4",
+            },
+            "depthMetadata": None,
+        }
+
+    def test_mobile_observation_and_media_payloads_are_validated_at_ingress(self):
+        legacy_media = self.portable_media()
+        legacy_media.pop("cameraCaptureEvidence")
+        depth_media = self.portable_media()
+        depth_media.pop("cameraCaptureEvidence")
+        depth_media.update(
+            {
+                "kind": "point_cloud",
+                "mimeType": "model/ply",
+                "depthMetadata": {
+                    "scanId": "3e3ed46b-290e-455a-a763-c59fab2a4321",
+                    "provider": "arkit-lidar",
+                    "role": "point_cloud",
+                    "measurements": [
+                        {
+                            "label": "Median range",
+                            "value": 1.8,
+                            "unit": "m",
+                            "uncertainty": 0.1,
+                        }
+                    ],
+                },
+            }
+        )
+        for entity_type, payload in (
+            ("observation", self.portable_observation()),
+            ("media", self.portable_media()),
+            ("media", legacy_media),
+            ("media", depth_media),
+        ):
+            with self.subTest(entity_type=entity_type):
+                mutation = Mutation.from_json(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "entityType": entity_type,
+                        "entityId": payload["id"],
+                        "operation": "create",
+                        "payload": payload,
+                    }
+                )
+                self.assertEqual(mutation.payload, payload)
+
+    def test_media_ingress_rejects_raw_exif_and_invalid_capture_chronology(self):
+        for mutate in (
+            lambda payload: payload["cameraCaptureEvidence"].update(
+                {"exif": '{"MakerNote":"must not sync"}'}
+            ),
+            lambda payload: payload["cameraCaptureEvidence"].update(
+                {"captureCompletedAt": "2026-07-30T11:59:49.000Z"}
+            ),
+        ):
+            payload = self.portable_media()
+            mutate(payload)
+            with self.assertRaises(ApiError) as caught:
+                Mutation.from_json(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "entityType": "media",
+                        "entityId": payload["id"],
+                        "operation": "create",
+                        "payload": payload,
+                    }
+                )
+            self.assertEqual(caught.exception.code, "INVALID_MUTABLE_PAYLOAD")
+
+    def test_observation_ingress_rejects_private_or_unknown_extra_fields(self):
+        payload = self.portable_observation()
+        payload["participantName"] = "Private person"
+        with self.assertRaises(ApiError) as caught:
+            Mutation.from_json(
+                {
+                    "id": str(uuid.uuid4()),
+                    "entityType": "observation",
+                    "entityId": payload["id"],
+                    "operation": "create",
+                    "payload": payload,
+                }
+            )
+        self.assertEqual(caught.exception.code, "INVALID_MUTABLE_PAYLOAD")
 
     def test_idempotent_mutation_and_cursor_changes(self):
         mutation = Mutation(
