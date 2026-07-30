@@ -90,7 +90,9 @@ Before enabling it:
 3. Store only the MQTT password in a mode-0600 file outside the repository.
 4. Set `AETHER_CHIRPSTACK_BINDINGS_FILE`,
    `AETHER_CHIRPSTACK_MQTT_PASSWORD_FILE`, and optionally
-   `AETHER_CHIRPSTACK_MQTT_USERNAME`.
+   `AETHER_CHIRPSTACK_MQTT_USERNAME`. The default MQTT host is the
+   `mosquitto` service alias on the external ChirpStack network; set
+   `AETHER_CHIRPSTACK_MQTT_HOST` only when that deployment uses another alias.
 5. Start the profile with
    `docker compose --profile chirpstack up -d --build`.
 

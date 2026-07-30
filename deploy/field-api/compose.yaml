@@ -34,7 +34,7 @@ services:
       AETHER_FIELD_DB: /data/field.sqlite3
       AETHER_FIELD_MEDIA: /data/media
       AETHER_CHIRPSTACK_BINDINGS: /config/bindings.json
-      AETHER_CHIRPSTACK_MQTT_HOST: chirpstack-mosquitto
+      AETHER_CHIRPSTACK_MQTT_HOST: "${AETHER_CHIRPSTACK_MQTT_HOST:-mosquitto}"
       AETHER_CHIRPSTACK_MQTT_PORT: "1883"
       AETHER_CHIRPSTACK_MQTT_USERNAME: "${AETHER_CHIRPSTACK_MQTT_USERNAME:-aether-field}"
       AETHER_CHIRPSTACK_MQTT_PASSWORD_FILE: /run/secrets/mqtt-password

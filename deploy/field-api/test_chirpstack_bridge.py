@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from aether_field_api import PublishedRecord
 from chirpstack_bridge import normalize_uplink
@@ -67,6 +68,16 @@ UPLINK = {
 
 
 class ChirpStackBridgeTests(unittest.TestCase):
+    def test_compose_uses_the_external_network_service_alias_by_default(self):
+        compose = Path(__file__).with_name("compose.yaml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            'AETHER_CHIRPSTACK_MQTT_HOST: "${AETHER_CHIRPSTACK_MQTT_HOST:-mosquitto}"',
+            compose,
+        )
+
     def test_normalizes_bound_measurements_and_radio_metadata(self):
         readings = normalize_uplink(UPLINK, BINDING)
 
