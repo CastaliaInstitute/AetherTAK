@@ -34,6 +34,7 @@ entire TAK certificate workspace because it contains CA private keys.
 - `POST /v1/mutations` applies an idempotent domain mutation.
 - `GET /v1/changes?cursor=0&limit=100` returns ordered remote changes.
 - `PUT /v1/media/{mediaId}` streams a media artifact.
+- `GET /v1/media/{mediaId}` downloads an indexed media artifact.
 - `GET /healthz` reports readiness (and still requires mutual TLS).
 
 Updates and deletes require `baseRevision`. A stale revision returns HTTP 409
@@ -42,6 +43,8 @@ versions and mark a conflict rather than silently overwriting field data.
 
 Media uploads require `Content-Length` and `X-Aether-Sha256`. Optional
 `X-Aether-Observation-Id` and `X-Aether-Role` headers retain artifact context.
+Downloads return the stored content type and length plus `X-Aether-Sha256`;
+clients must validate all three before committing a file to offline storage.
 
 ## Test
 

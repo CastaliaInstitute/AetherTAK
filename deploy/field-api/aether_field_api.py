@@ -18,12 +18,13 @@ import ssl
 import tempfile
 import threading
 import urllib.parse
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 ALLOWED_ENTITY_TYPES = {
@@ -126,12 +127,21 @@ class FieldStore:
         media_root.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        try:
+            yield connection
+        except Exception:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._schema_lock, self._connect() as connection:
@@ -329,6 +339,30 @@ class FieldStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def media_download(self, media_id: str) -> tuple[dict[str, Any], Path]:
+        record = self.media_record(media_id)
+        if not record:
+            raise ApiError(
+                HTTPStatus.NOT_FOUND,
+                "MEDIA_NOT_FOUND",
+                "No media artifact exists for this ID.",
+            )
+        media_root = self.media_root.resolve()
+        path = (media_root / record["relative_path"]).resolve()
+        if path.parent != media_root:
+            raise ApiError(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "MEDIA_PATH_INVALID",
+                "The indexed media path is invalid.",
+            )
+        if not path.is_file() or path.stat().st_size != record["size_bytes"]:
+            raise ApiError(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "MEDIA_UNAVAILABLE",
+                "The indexed media artifact is unavailable.",
+            )
+        return record, path
+
     def save_media(
         self,
         *,
@@ -454,6 +488,23 @@ class AetherFieldHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _media(self, record: dict[str, Any], path: Path) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", record["content_type"])
+        self.send_header("Content-Length", str(record["size_bytes"]))
+        self.send_header("X-Aether-Sha256", record["sha256"])
+        self.send_header("X-Aether-Media-Id", record["media_id"])
+        if record["observation_id"]:
+            self.send_header("X-Aether-Observation-Id", record["observation_id"])
+        if record["role"]:
+            self.send_header("X-Aether-Role", record["role"])
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("ETag", f'"sha256:{record["sha256"]}"')
+        self.end_headers()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                self.wfile.write(chunk)
+
     def _error(self, error: ApiError) -> None:
         self._json(
             error.status,
@@ -500,6 +551,18 @@ class AetherFieldHandler(BaseHTTPRequestHandler):
                         "cursor and limit must be integers.",
                     ) from error
                 self._json(HTTPStatus.OK, self.field_server.store.changes(cursor, limit))
+                return
+            prefix = "/v1/media/"
+            if parsed.path.startswith(prefix) and len(parsed.path) > len(prefix):
+                media_id = urllib.parse.unquote(parsed.path[len(prefix) :])
+                if "/" in media_id or len(media_id) > 128:
+                    raise ApiError(
+                        HTTPStatus.BAD_REQUEST,
+                        "INVALID_MEDIA_ID",
+                        "Invalid media ID.",
+                    )
+                record, path = self.field_server.store.media_download(media_id)
+                self._media(record, path)
                 return
             raise ApiError(HTTPStatus.NOT_FOUND, "NOT_FOUND", "No such endpoint.")
         except ApiError as error:

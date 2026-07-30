@@ -84,6 +84,33 @@ class FieldStoreTests(unittest.TestCase):
         )
         self.assertFalse(first["idempotentReplay"])
         self.assertTrue(replay["idempotentReplay"])
+        record, path = self.store.media_download("media-1")
+        self.assertEqual(path.read_bytes(), content)
+        self.assertEqual(record["content_type"], "model/ply")
+        self.assertEqual(record["sha256"], checksum)
+
+    def test_missing_and_invalid_indexed_media_are_not_downloaded(self):
+        with self.assertRaises(ApiError) as missing:
+            self.store.media_download("does-not-exist")
+        self.assertEqual(missing.exception.code, "MEDIA_NOT_FOUND")
+
+        content = b"field photo"
+        checksum = hashlib.sha256(content).hexdigest()
+        self.store.save_media(
+            media_id="media-2",
+            content_type="image/jpeg",
+            expected_sha256=checksum,
+            observation_id=None,
+            role=None,
+            author_cn="Field One",
+            stream=io.BytesIO(content),
+            content_length=len(content),
+        )
+        record, path = self.store.media_download("media-2")
+        path.unlink()
+        with self.assertRaises(ApiError) as unavailable:
+            self.store.media_download(record["media_id"])
+        self.assertEqual(unavailable.exception.code, "MEDIA_UNAVAILABLE")
 
 
 if __name__ == "__main__":
