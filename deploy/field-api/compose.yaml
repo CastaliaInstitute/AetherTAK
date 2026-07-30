@@ -1,0 +1,28 @@
+services:
+  field-api:
+    build:
+      context: .
+    environment:
+      AETHER_FIELD_DB: /data/field.sqlite3
+      AETHER_FIELD_MEDIA: /data/media
+      AETHER_FIELD_PORT: "9443"
+      AETHER_FIELD_TLS_CERT: /certs/server.pem
+      AETHER_FIELD_TLS_KEY: /certs/server.key
+      AETHER_FIELD_TLS_CA: /certs/ca.pem
+      AETHER_FIELD_TLS_KEY_PASSWORD_FILE: /certs/key-password
+    ports:
+      - "${AETHER_FIELD_BIND_IP:-127.0.0.1}:9443:9443"
+    volumes:
+      - field_data:/data
+      - "${AETHER_TAK_CERT_DIR:?Set AETHER_TAK_CERT_DIR}:/certs:ro"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+volumes:
+  field_data:
